@@ -1,6 +1,7 @@
 package terminalpane
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"sync"
@@ -76,6 +77,23 @@ func drawInRect(t *testing.T, tp *TerminalPane, sim tcell.SimulationScreen, x, y
 	tp.SetRect(x, y, w, h)
 	tp.Draw(sim)
 	sim.Show()
+}
+
+// feedLines writes n numbered lines ("line1".."lineN", CRLF-separated) as a
+// single chunk and waits for the consumer to ingest it. On a screen shorter
+// than n rows the excess scrolls into the emulator's scrollback buffer.
+func feedLines(t *testing.T, tp *TerminalPane, src chan []byte, n int) {
+	t.Helper()
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteString("\r\n")
+		}
+		fmt.Fprintf(&b, "line%d", i)
+	}
+	before := tp.Touched()
+	src <- []byte(b.String())
+	waitForTouched(t, tp, before+1)
 }
 
 // --- tests ---
@@ -455,6 +473,261 @@ func TestTerminalPane_SendEmptyBytes(t *testing.T) {
 		t.Fatal("expected no send for empty bytes")
 	case <-time.After(20 * time.Millisecond):
 	}
+}
+
+func TestTerminalPane_ScrollByMovesIntoHistory(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines on a 4-row screen → 6 lines in scrollback.
+	feedLines(t, tp, src, 10)
+	testutil.Equal(t, tp.emu.ScrollbackLen(), 6)
+
+	tp.ScrollBy(3)
+	testutil.Equal(t, tp.ScrollOffset(), 3)
+	tp.ScrollBy(2)
+	testutil.Equal(t, tp.ScrollOffset(), 5)
+}
+
+func TestTerminalPane_ScrollByClampsToScrollbackLen(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(1000)
+	testutil.Equal(t, tp.ScrollOffset(), tp.emu.ScrollbackLen())
+}
+
+func TestTerminalPane_ScrollByClampsAtZero(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(3)
+	tp.ScrollBy(-1000)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ScrollByNoOpWithoutScrollback(t *testing.T) {
+	src := make(chan []byte)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// Nothing fed — no history to scroll into.
+	tp.ScrollBy(5)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ResetScrollReturnsToLive(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(4)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+	tp.ResetScroll()
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ScrollByNoOpWhenEmulatorMissing(t *testing.T) {
+	src := make(chan []byte)
+	tp := New(src)
+	defer tp.Close()
+	tp.mu.Lock()
+	tp.emu = nil
+	tp.mu.Unlock()
+	tp.ScrollBy(5) // must not panic
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_PaintScrolledShowsHistoryWindow(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines on a 4-row screen: scrollback holds line1..line6, the live
+	// screen shows line7..line10.
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(3)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Combined lines [3, 7) → line4..line7. The top content row is partly
+	// covered by the [SCROLL] badge, so assert the unobscured rows.
+	testutil.Contains(t, readRow(sim, 2, 24), "line5")
+	testutil.Contains(t, readRow(sim, 3, 24), "line6")
+	testutil.Contains(t, readRow(sim, 4, 24), "line7")
+}
+
+func TestTerminalPane_PaintScrolledToOldestLine(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(1000) // clamps to ScrollbackLen (6)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Combined lines [0, 4) → line1..line4 (line1 sits under the badge).
+	testutil.Contains(t, readRow(sim, 2, 24), "line2")
+	testutil.Contains(t, readRow(sim, 3, 24), "line3")
+	testutil.Contains(t, readRow(sim, 4, 24), "line4")
+}
+
+func TestTerminalPane_PaintScrolledShowsBadge(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(2)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Badge renders on the top content row (inner row 1 after the border).
+	testutil.Contains(t, readRow(sim, 1, 24), "[SCROLL]")
+}
+
+func TestTerminalPane_PaintAtZeroOffsetMatchesLiveView(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	// Scroll up, then back to live — the badge must vanish and the live
+	// screen rows (line7..line10) must paint exactly as before scrolling.
+	tp.ScrollBy(3)
+	tp.ResetScroll()
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	if strings.Contains(readRow(sim, 1, 24), "[SCROLL]") {
+		t.Fatal("badge must not render at offset 0")
+	}
+	testutil.Contains(t, readRow(sim, 1, 24), "line7")
+	testutil.Contains(t, readRow(sim, 2, 24), "line8")
+	testutil.Contains(t, readRow(sim, 3, 24), "line9")
+	testutil.Contains(t, readRow(sim, 4, 24), "line10")
+}
+
+func TestTerminalPane_AnchorLockGrowsOffsetWithNewOutput(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines → scrollback line1..line6, live line7..line10.
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+	testutil.Equal(t, tp.ScrollOffset(), 3)
+
+	// Two more lines push line11/line12 into the live screen and line7/
+	// line8 into scrollback (sbLen 6 → 8). The effective offset must grow
+	// by the same delta so the viewed window stays put.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 5)
+}
+
+func TestTerminalPane_AnchorLockKeepsViewedContentStable(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+	wantRows := []string{readRow(sim, 2, 24), readRow(sim, 3, 24), readRow(sim, 4, 24)}
+
+	// New output arrives while scrolled — repaint must show the same rows.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	gotRows := []string{readRow(sim, 2, 24), readRow(sim, 3, 24), readRow(sim, 4, 24)}
+	for i := range wantRows {
+		testutil.Equal(t, gotRows[i], wantRows[i])
+	}
+}
+
+func TestTerminalPane_AnchorLockReclampsWhenBufferShrinks(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(4)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+
+	// Simulate the buffer trimming below the anchored offset — the
+	// effective offset must re-clamp to the available history.
+	tp.emu.ClearScrollback()
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_AnchorLockHonorsScrollbackCapacity(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+	// Cap the buffer so it trims while scrolled.
+	tp.emu.SetScrollbackSize(4)
+
+	feedLines(t, tp, src, 10) // sbLen capped at 4
+	tp.ScrollBy(1000)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+
+	// More output: the buffer trims oldest lines; the offset stays clamped
+	// within [0, ScrollbackLen] instead of running past the buffer.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+}
+
+func TestTerminalPane_ScrollPastZeroClearsAnchor(t *testing.T) {
+	src := make(chan []byte, 3)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+	tp.ScrollBy(-1000)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+
+	// Anchor is cleared: new output must NOT drag the offset back up.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
 }
 
 func TestUvCellToTcellStyle_NilCellReturnsDefault(t *testing.T) {
