@@ -631,6 +631,105 @@ func TestTerminalPane_PaintAtZeroOffsetMatchesLiveView(t *testing.T) {
 	testutil.Contains(t, readRow(sim, 4, 24), "line10")
 }
 
+func TestTerminalPane_AnchorLockGrowsOffsetWithNewOutput(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines → scrollback line1..line6, live line7..line10.
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+	testutil.Equal(t, tp.ScrollOffset(), 3)
+
+	// Two more lines push line11/line12 into the live screen and line7/
+	// line8 into scrollback (sbLen 6 → 8). The effective offset must grow
+	// by the same delta so the viewed window stays put.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 5)
+}
+
+func TestTerminalPane_AnchorLockKeepsViewedContentStable(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+	wantRows := []string{readRow(sim, 2, 24), readRow(sim, 3, 24), readRow(sim, 4, 24)}
+
+	// New output arrives while scrolled — repaint must show the same rows.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	gotRows := []string{readRow(sim, 2, 24), readRow(sim, 3, 24), readRow(sim, 4, 24)}
+	for i := range wantRows {
+		testutil.Equal(t, gotRows[i], wantRows[i])
+	}
+}
+
+func TestTerminalPane_AnchorLockReclampsWhenBufferShrinks(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(4)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+
+	// Simulate the buffer trimming below the anchored offset — the
+	// effective offset must re-clamp to the available history.
+	tp.emu.ClearScrollback()
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_AnchorLockHonorsScrollbackCapacity(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+	// Cap the buffer so it trims while scrolled.
+	tp.emu.SetScrollbackSize(4)
+
+	feedLines(t, tp, src, 10) // sbLen capped at 4
+	tp.ScrollBy(1000)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+
+	// More output: the buffer trims oldest lines; the offset stays clamped
+	// within [0, ScrollbackLen] instead of running past the buffer.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+}
+
+func TestTerminalPane_ScrollPastZeroClearsAnchor(t *testing.T) {
+	src := make(chan []byte, 3)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+	tp.ScrollBy(-1000)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+
+	// Anchor is cleared: new output must NOT drag the offset back up.
+	before := tp.Touched()
+	src <- []byte("\r\nline11\r\nline12")
+	waitForTouched(t, tp, before+1)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
 func TestUvCellToTcellStyle_NilCellReturnsDefault(t *testing.T) {
 	st := uvCellToTcellStyle(nil)
 	testutil.Equal(t, st, tcell.StyleDefault)

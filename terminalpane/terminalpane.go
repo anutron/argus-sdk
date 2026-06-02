@@ -51,6 +51,11 @@ type TerminalPane struct {
 	// scrollOffset is how many lines the view is scrolled up into the
 	// emulator's scrollback history. 0 means live (bottom). Guarded by mu.
 	scrollOffset int
+	// anchorSBLen is ScrollbackLen at the moment scrollOffset was last set.
+	// While scrolled, new output landing in scrollback grows the effective
+	// offset by the delta so the viewed content stays pinned (anchor-lock).
+	// Guarded by mu.
+	anchorSBLen int
 
 	touched uint64 // accessed via sync/atomic
 
@@ -146,11 +151,12 @@ func (tp *TerminalPane) Resize(cols, rows int) {
 // ScrollBy adjusts the scrollback view offset by delta lines. Positive
 // delta scrolls up into history; negative scrolls back toward live. The
 // effective offset clamps to [0, ScrollbackLen] — scrolling past either
-// end is a no-op beyond the boundary.
+// end is a no-op beyond the boundary. Scrolling down past zero returns
+// the pane to live and clears the anchor.
 func (tp *TerminalPane) ScrollBy(delta int) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
-	off := tp.scrollOffset + delta
+	off := tp.effectiveOffsetLocked() + delta
 	if tp.emu != nil {
 		if maxOff := tp.emu.ScrollbackLen(); off > maxOff {
 			off = maxOff
@@ -158,18 +164,22 @@ func (tp *TerminalPane) ScrollBy(delta int) {
 	} else {
 		off = 0
 	}
-	if off < 0 {
-		off = 0
+	if off <= 0 {
+		tp.scrollOffset = 0
+		tp.anchorSBLen = 0
+		return
 	}
 	tp.scrollOffset = off
+	tp.anchorSBLen = tp.emu.ScrollbackLen()
 }
 
-// ScrollOffset returns the current scrollback view offset. 0 means the pane
-// is live (pinned to the bottom of output).
+// ScrollOffset returns the current scrollback view offset, including any
+// anchor-lock growth from output that arrived while scrolled. 0 means the
+// pane is live (pinned to the bottom of output).
 func (tp *TerminalPane) ScrollOffset() int {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
-	return tp.scrollOffset
+	return tp.effectiveOffsetLocked()
 }
 
 // ResetScroll returns the pane to the live view.
@@ -177,6 +187,26 @@ func (tp *TerminalPane) ResetScroll() {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	tp.scrollOffset = 0
+	tp.anchorSBLen = 0
+}
+
+// effectiveOffsetLocked returns the scroll offset adjusted for output that
+// landed in scrollback since the offset was last set (anchor-lock), clamped
+// to the available history — the buffer may have trimmed at capacity since
+// the anchor was recorded. Callers must hold tp.mu.
+func (tp *TerminalPane) effectiveOffsetLocked() int {
+	if tp.scrollOffset == 0 || tp.emu == nil {
+		return 0
+	}
+	sbLen := tp.emu.ScrollbackLen()
+	off := tp.scrollOffset + (sbLen - tp.anchorSBLen)
+	if off > sbLen {
+		off = sbLen
+	}
+	if off < 0 {
+		off = 0
+	}
+	return off
 }
 
 // PTYSize returns the emulator's current cols/rows. Useful in tests.
@@ -256,7 +286,7 @@ func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 	emu := tp.emu
 	cols := tp.cols
 	rows := tp.rows
-	offset := tp.scrollOffset
+	offset := tp.effectiveOffsetLocked()
 	tp.mu.Unlock()
 	if emu == nil {
 		return
