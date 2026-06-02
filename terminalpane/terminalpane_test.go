@@ -1,6 +1,7 @@
 package terminalpane
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"sync"
@@ -76,6 +77,23 @@ func drawInRect(t *testing.T, tp *TerminalPane, sim tcell.SimulationScreen, x, y
 	tp.SetRect(x, y, w, h)
 	tp.Draw(sim)
 	sim.Show()
+}
+
+// feedLines writes n numbered lines ("line1".."lineN", CRLF-separated) as a
+// single chunk and waits for the consumer to ingest it. On a screen shorter
+// than n rows the excess scrolls into the emulator's scrollback buffer.
+func feedLines(t *testing.T, tp *TerminalPane, src chan []byte, n int) {
+	t.Helper()
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteString("\r\n")
+		}
+		fmt.Fprintf(&b, "line%d", i)
+	}
+	before := tp.Touched()
+	src <- []byte(b.String())
+	waitForTouched(t, tp, before+1)
 }
 
 // --- tests ---
@@ -455,6 +473,83 @@ func TestTerminalPane_SendEmptyBytes(t *testing.T) {
 		t.Fatal("expected no send for empty bytes")
 	case <-time.After(20 * time.Millisecond):
 	}
+}
+
+func TestTerminalPane_ScrollByMovesIntoHistory(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines on a 4-row screen → 6 lines in scrollback.
+	feedLines(t, tp, src, 10)
+	testutil.Equal(t, tp.emu.ScrollbackLen(), 6)
+
+	tp.ScrollBy(3)
+	testutil.Equal(t, tp.ScrollOffset(), 3)
+	tp.ScrollBy(2)
+	testutil.Equal(t, tp.ScrollOffset(), 5)
+}
+
+func TestTerminalPane_ScrollByClampsToScrollbackLen(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(1000)
+	testutil.Equal(t, tp.ScrollOffset(), tp.emu.ScrollbackLen())
+}
+
+func TestTerminalPane_ScrollByClampsAtZero(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(3)
+	tp.ScrollBy(-1000)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ScrollByNoOpWithoutScrollback(t *testing.T) {
+	src := make(chan []byte)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// Nothing fed — no history to scroll into.
+	tp.ScrollBy(5)
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ResetScrollReturnsToLive(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(4)
+	testutil.Equal(t, tp.ScrollOffset(), 4)
+	tp.ResetScroll()
+	testutil.Equal(t, tp.ScrollOffset(), 0)
+}
+
+func TestTerminalPane_ScrollByNoOpWhenEmulatorMissing(t *testing.T) {
+	src := make(chan []byte)
+	tp := New(src)
+	defer tp.Close()
+	tp.mu.Lock()
+	tp.emu = nil
+	tp.mu.Unlock()
+	tp.ScrollBy(5) // must not panic
+	testutil.Equal(t, tp.ScrollOffset(), 0)
 }
 
 func TestUvCellToTcellStyle_NilCellReturnsDefault(t *testing.T) {

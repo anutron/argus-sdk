@@ -48,6 +48,10 @@ type TerminalPane struct {
 	cols int
 	rows int
 
+	// scrollOffset is how many lines the view is scrolled up into the
+	// emulator's scrollback history. 0 means live (bottom). Guarded by mu.
+	scrollOffset int
+
 	touched uint64 // accessed via sync/atomic
 
 	source    <-chan []byte
@@ -137,6 +141,42 @@ func (tp *TerminalPane) Resize(cols, rows int) {
 	tp.cols = cols
 	tp.rows = rows
 	tp.emu.Resize(cols, rows)
+}
+
+// ScrollBy adjusts the scrollback view offset by delta lines. Positive
+// delta scrolls up into history; negative scrolls back toward live. The
+// effective offset clamps to [0, ScrollbackLen] — scrolling past either
+// end is a no-op beyond the boundary.
+func (tp *TerminalPane) ScrollBy(delta int) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	off := tp.scrollOffset + delta
+	if tp.emu != nil {
+		if maxOff := tp.emu.ScrollbackLen(); off > maxOff {
+			off = maxOff
+		}
+	} else {
+		off = 0
+	}
+	if off < 0 {
+		off = 0
+	}
+	tp.scrollOffset = off
+}
+
+// ScrollOffset returns the current scrollback view offset. 0 means the pane
+// is live (pinned to the bottom of output).
+func (tp *TerminalPane) ScrollOffset() int {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.scrollOffset
+}
+
+// ResetScroll returns the pane to the live view.
+func (tp *TerminalPane) ResetScroll() {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.scrollOffset = 0
 }
 
 // PTYSize returns the emulator's current cols/rows. Useful in tests.
