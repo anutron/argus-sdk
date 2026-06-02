@@ -552,6 +552,85 @@ func TestTerminalPane_ScrollByNoOpWhenEmulatorMissing(t *testing.T) {
 	testutil.Equal(t, tp.ScrollOffset(), 0)
 }
 
+func TestTerminalPane_PaintScrolledShowsHistoryWindow(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// 10 lines on a 4-row screen: scrollback holds line1..line6, the live
+	// screen shows line7..line10.
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(3)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Combined lines [3, 7) → line4..line7. The top content row is partly
+	// covered by the [SCROLL] badge, so assert the unobscured rows.
+	testutil.Contains(t, readRow(sim, 2, 24), "line5")
+	testutil.Contains(t, readRow(sim, 3, 24), "line6")
+	testutil.Contains(t, readRow(sim, 4, 24), "line7")
+}
+
+func TestTerminalPane_PaintScrolledToOldestLine(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(1000) // clamps to ScrollbackLen (6)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Combined lines [0, 4) → line1..line4 (line1 sits under the badge).
+	testutil.Contains(t, readRow(sim, 2, 24), "line2")
+	testutil.Contains(t, readRow(sim, 3, 24), "line3")
+	testutil.Contains(t, readRow(sim, 4, 24), "line4")
+}
+
+func TestTerminalPane_PaintScrolledShowsBadge(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	tp.ScrollBy(2)
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// Badge renders on the top content row (inner row 1 after the border).
+	testutil.Contains(t, readRow(sim, 1, 24), "[SCROLL]")
+}
+
+func TestTerminalPane_PaintAtZeroOffsetMatchesLiveView(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+
+	// Scroll up, then back to live — the badge must vanish and the live
+	// screen rows (line7..line10) must paint exactly as before scrolling.
+	tp.ScrollBy(3)
+	tp.ResetScroll()
+	sim := newSimScreen(t, 24, 8)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	if strings.Contains(readRow(sim, 1, 24), "[SCROLL]") {
+		t.Fatal("badge must not render at offset 0")
+	}
+	testutil.Contains(t, readRow(sim, 1, 24), "line7")
+	testutil.Contains(t, readRow(sim, 2, 24), "line8")
+	testutil.Contains(t, readRow(sim, 3, 24), "line9")
+	testutil.Contains(t, readRow(sim, 4, 24), "line10")
+}
+
 func TestUvCellToTcellStyle_NilCellReturnsDefault(t *testing.T) {
 	st := uvCellToTcellStyle(nil)
 	testutil.Equal(t, st, tcell.StyleDefault)

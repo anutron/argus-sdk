@@ -248,14 +248,15 @@ func (tp *TerminalPane) Draw(screen tcell.Screen) {
 	tp.paint(screen, inner.X, inner.Y, inner.W, inner.H)
 }
 
-// paint walks the emulator's main screen and writes each cell to tcell.
-// No scrollback rendering — plugin views ship discrete full-screen frames;
-// the host terminal already owns the scrollback for the surrounding TUI.
+// paint walks the emulator's surface and writes each cell to tcell. At
+// scroll offset 0 the live main screen paints directly; while scrolled the
+// visible window composes from scrollback history plus the live screen.
 func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 	tp.mu.Lock()
 	emu := tp.emu
 	cols := tp.cols
 	rows := tp.rows
+	offset := tp.scrollOffset
 	tp.mu.Unlock()
 	if emu == nil {
 		return
@@ -264,23 +265,83 @@ func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 	renderCols := min(cols, w)
 	renderRows := min(rows, h)
 
+	if offset > 0 {
+		tp.paintScrolled(screen, emu, x, y, w, renderCols, renderRows, rows, offset)
+		return
+	}
+
 	for row := 0; row < renderRows; row++ {
 		for col := 0; col < renderCols; col++ {
-			cell := emu.CellAt(col, row)
-			ch := ' '
-			st := tcell.StyleDefault
-			if cell != nil {
-				if cell.Content != "" {
-					rs := []rune(cell.Content)
-					if len(rs) > 0 {
-						ch = rs[0]
-					}
-				}
-				st = uvCellToTcellStyle(cell)
-			}
+			ch, st := cellRuneStyle(emu.CellAt(col, row))
 			screen.SetContent(x+col, y+row, ch, nil, st)
 		}
 	}
+}
+
+// paintScrolled composes the visible window from the combined buffer —
+// scrollback lines (index 0 = oldest) followed by the live screen rows.
+// With total = ScrollbackLen + live rows, the window covers combined lines
+// [total − offset − renderRows, total − offset). A [SCROLL] badge on the
+// top content row marks scroll mode (mirrors argus's task terminal).
+func (tp *TerminalPane) paintScrolled(screen tcell.Screen, emu *xvt.SafeEmulator, x, y, w, renderCols, renderRows, rows, offset int) {
+	sbLen := emu.ScrollbackLen()
+	if offset > sbLen {
+		// The buffer may have trimmed at capacity since the offset was set.
+		offset = sbLen
+	}
+	total := sbLen + rows
+	end := total - offset // exclusive
+	start := end - renderRows
+	if start < 0 {
+		start = 0
+	}
+
+	for screenRow := 0; screenRow < renderRows; screenRow++ {
+		lineIdx := start + screenRow
+		if lineIdx >= end {
+			break
+		}
+		for col := 0; col < renderCols; col++ {
+			var cell *uv.Cell
+			if lineIdx < sbLen {
+				cell = emu.ScrollbackCellAt(col, lineIdx)
+			} else {
+				cell = emu.CellAt(col, lineIdx-sbLen)
+			}
+			ch, st := cellRuneStyle(cell)
+			screen.SetContent(x+col, y+screenRow, ch, nil, st)
+		}
+	}
+
+	// Scroll-mode badge, centered on the top content row.
+	const indicator = "   [SCROLL]   "
+	badgeStyle := tcell.StyleDefault.Foreground(tcell.PaletteColor(214)).Bold(true)
+	midX := x + (w-len(indicator))/2
+	if midX < x {
+		midX = x
+	}
+	for i, r := range indicator {
+		if midX+i < x+w {
+			screen.SetContent(midX+i, y, r, nil, badgeStyle)
+		}
+	}
+}
+
+// cellRuneStyle converts an emulator cell to the rune and style painted to
+// tcell. Nil and empty cells render as a default-styled blank.
+func cellRuneStyle(cell *uv.Cell) (rune, tcell.Style) {
+	ch := ' '
+	st := tcell.StyleDefault
+	if cell != nil {
+		if cell.Content != "" {
+			rs := []rune(cell.Content)
+			if len(rs) > 0 {
+				ch = rs[0]
+			}
+		}
+		st = uvCellToTcellStyle(cell)
+	}
+	return ch, st
 }
 
 // PasteHandler forwards pasted text to the configured InputBack channel.
