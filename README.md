@@ -16,13 +16,17 @@ truth if drn/argus ever adopts back.
 - **`widget/`** — drawing primitives: `DrawText`, `FillArea`,
   `DrawBorder`, `DrawBorderedPanel`, the `InnerRect` type, the `AnsiRe`
   regex.
+- **`keyenc/`** — `Encode` maps a `tcell` key event to the raw bytes a
+  terminal application expects on its input stream (xterm conventions:
+  arrows, modified arrows, Ctrl/Alt/Shift combos, C0 controls). The single
+  source of truth `terminalpane` uses to forward keystrokes to a plugin.
 - **`theme/`** — color, icon, and style tokens. Match these in custom
   widgets so plugin UIs feel like argus.
 
 ## Provenance
 
-- `theme/`, `widget/`, `terminalpane/` were copied from
-  `drn/argus internal/tui/` (theme, widget, terminalpane packages).
+- `theme/`, `widget/`, `terminalpane/`, `keyenc/` were copied from
+  `drn/argus internal/tui/` (theme, widget, terminalpane, keyenc packages).
 - `pluginview/` was copied from `anutron/hera internal/view/screen/`.
 
 Both upstreams retain their original copies for now. When argus is ready
