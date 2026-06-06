@@ -179,9 +179,9 @@ func (s *Screen) handleEnvelope(data []byte) {
 // Sync can ship them as one frame) and serving inbound WebSocket bytes as
 // the input stream tcell's parser scans.
 type wsTty struct {
-	inMu     sync.Mutex
-	inBuf    []byte
-	inWake   chan struct{}
+	inMu   sync.Mutex
+	inBuf  []byte
+	inWake chan struct{}
 
 	outMu  sync.Mutex
 	outBuf []byte
@@ -191,9 +191,9 @@ type wsTty struct {
 	rows     int
 	resizeCB func()
 
-	doneMu    sync.Mutex
+	doneMu     sync.Mutex
 	doneClosed bool
-	done      chan struct{}
+	done       chan struct{}
 }
 
 func newWSTty() *wsTty {

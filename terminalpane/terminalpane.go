@@ -58,6 +58,10 @@ type TerminalPane struct {
 	// Guarded by mu.
 	anchorSBLen int
 
+	// cursorHidden tracks the emulator's DECTCEM cursor-hide state. Updated
+	// via the CursorVisibility callback; read in paint(). Guarded by mu.
+	cursorHidden bool
+
 	touched uint64 // accessed via sync/atomic
 
 	source    <-chan []byte
@@ -87,6 +91,13 @@ func New(source <-chan []byte) *TerminalPane {
 		done:    make(chan struct{}),
 	}
 	tp.emu = newDrainedEmulator(tp.cols, tp.rows)
+	tp.emu.SetCallbacks(xvt.Callbacks{
+		CursorVisibility: func(visible bool) {
+			tp.mu.Lock()
+			tp.cursorHidden = !visible
+			tp.mu.Unlock()
+		},
+	})
 	go tp.consume()
 	return tp
 }
@@ -282,12 +293,15 @@ func (tp *TerminalPane) Draw(screen tcell.Screen) {
 // paint walks the emulator's surface and writes each cell to tcell. At
 // scroll offset 0 the live main screen paints directly; while scrolled the
 // visible window composes from scrollback history plus the live screen.
+// After painting cells, places the hardware cursor when the pane has focus,
+// DECTCEM is on, and the view is live (not scrolled); hides it otherwise.
 func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 	tp.mu.Lock()
 	emu := tp.emu
 	cols := tp.cols
 	rows := tp.rows
 	offset := tp.effectiveOffsetLocked()
+	cursorHidden := tp.cursorHidden
 	tp.mu.Unlock()
 	if emu == nil {
 		return
@@ -298,6 +312,7 @@ func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 
 	if offset > 0 {
 		tp.paintScrolled(screen, emu, x, y, w, renderCols, renderRows, rows, offset)
+		screen.HideCursor()
 		return
 	}
 
@@ -307,6 +322,16 @@ func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 			screen.SetContent(x+col, y+row, ch, nil, st)
 		}
 	}
+
+	if tp.HasFocus() && !cursorHidden {
+		pos := emu.CursorPosition()
+		cx, cy := pos.X, pos.Y
+		if cx >= 0 && cx < renderCols && cy >= 0 && cy < renderRows {
+			screen.ShowCursor(x+cx, y+cy)
+			return
+		}
+	}
+	screen.HideCursor()
 }
 
 // paintScrolled composes the visible window from the combined buffer —
