@@ -525,6 +525,97 @@ func TestTerminalPane_CursorHiddenWhenScrolled(t *testing.T) {
 	}
 }
 
+func TestTerminalPane_CursorCellIsReverseVideoWhenFocused(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	// Write 'M' at row 3, col 5 (1-based) then reposition cursor to the same
+	// cell so it sits on top of the character.
+	src <- []byte("\x1b[3;5HM\x1b[3;5H")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	tp.Focus(nil)
+	// Outer rect 0,0,42,12 → inner origin (1,1).
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	// Emu cursor (0-based) is at col 4, row 2 → screen (1+4, 1+2) = (5, 3).
+	r, st := readCell(sim, 5, 3)
+	testutil.Equal(t, r, 'M')
+	_, _, attrs := st.Decompose()
+	if attrs&tcell.AttrReverse == 0 {
+		t.Error("cursor cell must carry AttrReverse when pane is focused and DECTCEM is on")
+	}
+}
+
+func TestTerminalPane_CursorCellNormalStyleWhenUnfocused(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	src <- []byte("\x1b[3;5HM\x1b[3;5H")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	// Pane not focused — cursor cell must not have AttrReverse.
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	r, st := readCell(sim, 5, 3)
+	testutil.Equal(t, r, 'M')
+	_, _, attrs := st.Decompose()
+	if attrs&tcell.AttrReverse != 0 {
+		t.Error("cursor cell must not carry AttrReverse when pane is not focused")
+	}
+}
+
+func TestTerminalPane_CursorCellNormalStyleWhenDECTCEMOff(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	// Move to (3;5), write 'M', return cursor, then hide it with DECTCEM off.
+	src <- []byte("\x1b[3;5HM\x1b[3;5H\x1b[?25l")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	tp.Focus(nil)
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	r, st := readCell(sim, 5, 3)
+	testutil.Equal(t, r, 'M')
+	_, _, attrs := st.Decompose()
+	if attrs&tcell.AttrReverse != 0 {
+		t.Error("cursor cell must not carry AttrReverse when DECTCEM is off")
+	}
+}
+
+func TestTerminalPane_CursorCellNormalStyleWhenScrolled(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+
+	sim := newSimScreen(t, 24, 8)
+	tp.Focus(nil)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	// The live cursor sits at the emulator default (0,0); in the scrolled view
+	// that screen position shows scrollback content, which must not carry the
+	// reverse-video cursor style (paintScrolled never draws cursor cells).
+	_, st := readCell(sim, 1, 1)
+	_, _, attrs := st.Decompose()
+	if attrs&tcell.AttrReverse != 0 {
+		t.Error("scrolled view must not render reverse-video cursor cell")
+	}
+}
+
 func TestTerminalPane_SendDropsWhenBackFull(t *testing.T) {
 	src := make(chan []byte)
 	tp := New(src)
