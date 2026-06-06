@@ -327,6 +327,12 @@ func (tp *TerminalPane) paint(screen tcell.Screen, x, y, w, h int) {
 		pos := emu.CursorPosition()
 		cx, cy := pos.X, pos.Y
 		if cx >= 0 && cx < renderCols && cy >= 0 && cy < renderRows {
+			// Redraw the cursor cell with reverse-video so argus's plugin-view
+			// host — which paints plugin cells but drops ShowCursor() for plugin
+			// views — renders a visible cursor. The rune is preserved; only the
+			// style is toggled. ShowCursor is kept for terminals that do handle it.
+			ch, st := cellRuneStyle(emu.CellAt(cx, cy))
+			screen.SetContent(x+cx, y+cy, ch, nil, st.Reverse(true))
 			screen.ShowCursor(x+cx, y+cy)
 			return
 		}
