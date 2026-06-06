@@ -442,6 +442,89 @@ func TestTerminalPane_DrawWhenFocused(t *testing.T) {
 	tp.Draw(sim)
 }
 
+func TestTerminalPane_CursorShownAtCorrectPositionWhenFocused(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	// CSI [3;5H moves cursor to row 3, col 5 (1-indexed) = (4,2) 0-indexed.
+	src <- []byte("\x1b[3;5H")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	tp.Focus(nil)
+	// Outer rect 0,0,42,12 → inner origin (1,1).
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	// Screen cursor: x=1+4=5, y=1+2=3.
+	cx, cy, visible := sim.GetCursor()
+	if !visible {
+		t.Fatal("expected cursor visible when pane is focused")
+	}
+	if cx != 5 || cy != 3 {
+		t.Errorf("cursor at (%d,%d), want (5,3)", cx, cy)
+	}
+}
+
+func TestTerminalPane_CursorHiddenWhenNotFocused(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	src <- []byte("\x1b[3;5H")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	// Pane not focused — Draw must call HideCursor.
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	_, _, visible := sim.GetCursor()
+	if visible {
+		t.Fatal("expected cursor hidden when pane is not focused")
+	}
+}
+
+func TestTerminalPane_CursorHiddenByDECTCEM(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(40, 10)
+
+	// ESC[?25l disables DECTCEM (hides cursor).
+	src <- []byte("\x1b[3;5H\x1b[?25l")
+	waitForTouched(t, tp, 1)
+
+	sim := newSimScreen(t, 50, 14)
+	tp.Focus(nil)
+	drawInRect(t, tp, sim, 0, 0, 42, 12)
+
+	_, _, visible := sim.GetCursor()
+	if visible {
+		t.Fatal("expected cursor hidden when DECTCEM is off, even when focused")
+	}
+}
+
+func TestTerminalPane_CursorHiddenWhenScrolled(t *testing.T) {
+	src := make(chan []byte, 1)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	feedLines(t, tp, src, 10)
+	tp.ScrollBy(3)
+
+	sim := newSimScreen(t, 24, 8)
+	tp.Focus(nil)
+	drawInRect(t, tp, sim, 0, 0, 22, 6)
+
+	_, _, visible := sim.GetCursor()
+	if visible {
+		t.Fatal("expected cursor hidden while scrolled into history")
+	}
+}
+
 func TestTerminalPane_SendDropsWhenBackFull(t *testing.T) {
 	src := make(chan []byte)
 	tp := New(src)
