@@ -98,6 +98,50 @@ func New(source <-chan []byte) *TerminalPane {
 			tp.mu.Unlock()
 		},
 	})
+
+	// Intercept ED2 (ESC[2J) while in alt-screen to capture each rendered
+	// frame to the main scrollback. x/vt routes scrollback pushes to the
+	// active screen's own buffer; the alt screen's buffer is never visible
+	// via ScrollbackLen/ScrollbackCellAt. Bubble Tea fires ED2 before every
+	// full render, so each frame is captured as the operator scrolls back.
+	//
+	// Uses eRaw.* (raw Emulator) rather than tp.emu.* (SafeEmulator) —
+	// SafeEmulator.Write holds mu.Lock; re-entering via CellAt would deadlock.
+	// Returns false so the default ED2 handler (screen clear) also runs.
+	eRaw := tp.emu.Emulator
+	tp.emu.RegisterCsiHandler('J', func(params ansi.Params) bool {
+		n, _, _ := params.Param(0, 0)
+		if n != 2 || !eRaw.IsAltScreen() {
+			return false
+		}
+		mainSB := eRaw.Scrollback()
+		if mainSB == nil {
+			return false
+		}
+		w, h := eRaw.Width(), eRaw.Height()
+		for y := 0; y < h; y++ {
+			hasContent := false
+			for x := 0; x < w; x++ {
+				cell := eRaw.CellAt(x, y)
+				if cell != nil && cell.Content != "" && cell.Content != " " {
+					hasContent = true
+					break
+				}
+			}
+			if !hasContent {
+				continue
+			}
+			line := make(uv.Line, w)
+			for x := 0; x < w; x++ {
+				if cell := eRaw.CellAt(x, y); cell != nil {
+					line[x] = *cell
+				}
+			}
+			mainSB.Push(line)
+		}
+		return false
+	})
+
 	go tp.consume()
 	return tp
 }

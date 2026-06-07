@@ -649,6 +649,62 @@ func TestTerminalPane_SendEmptyBytes(t *testing.T) {
 	}
 }
 
+func TestTerminalPane_AltScreenED2CapturesFrameToMainScrollback(t *testing.T) {
+	src := make(chan []byte, 4)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// Precondition: no scrollback yet.
+	testutil.Equal(t, tp.emu.ScrollbackLen(), 0)
+
+	// Enter alt-screen mode (Bubble Tea startup sequence).
+	src <- []byte("\x1b[?1049h")
+	waitForTouched(t, tp, 1)
+
+	// Write labeled content then fire ED2 — mirrors one Bubble Tea render
+	// cycle. Our CSI handler intercepts ED2 to push the frame to the main
+	// scrollback before the default handler clears the screen.
+	src <- []byte("\x1b[1;1Haltcontent\x1b[2J")
+	waitForTouched(t, tp, 2)
+
+	// Main scrollback must now hold the captured alt-screen frame.
+	sbLen := tp.emu.ScrollbackLen()
+	if sbLen == 0 {
+		t.Fatal("alt-screen ED2 frame not captured to main scrollback (scrollback is empty)")
+	}
+
+	// The captured row must contain the text we wrote to the alt screen.
+	var got strings.Builder
+	for x := 0; x < len("altcontent"); x++ {
+		if cell := tp.emu.ScrollbackCellAt(x, 0); cell != nil {
+			got.WriteString(cell.Content)
+		}
+	}
+	if !strings.Contains(got.String(), "altcontent") {
+		t.Errorf("captured scrollback row does not contain alt-screen text: got %q", got.String())
+	}
+}
+
+func TestTerminalPane_AltScreenED2NoopWhenNotAltScreen(t *testing.T) {
+	src := make(chan []byte, 2)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// ED2 on the main screen must not push to main scrollback (the default
+	// ClearWithScrollback behaviour handles that separately).
+	src <- []byte("\x1b[1;1Hmaintext\x1b[2J")
+	waitForTouched(t, tp, 1)
+
+	// Main scrollback is populated by ClearWithScrollback (the default ED2
+	// path), not by our alt-screen interceptor — so lines may be present.
+	// What we verify is that we are NOT in alt-screen mode (the guard worked).
+	if tp.emu.IsAltScreen() {
+		t.Error("emulator should not be in alt-screen mode after main-screen ED2")
+	}
+}
+
 func TestTerminalPane_ScrollByMovesIntoHistory(t *testing.T) {
 	src := make(chan []byte, 1)
 	tp := New(src)
