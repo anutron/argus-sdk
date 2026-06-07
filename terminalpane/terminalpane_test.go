@@ -669,9 +669,14 @@ func TestTerminalPane_AltScreenED2CapturesFrameToMainScrollback(t *testing.T) {
 	waitForTouched(t, tp, 2)
 
 	// Main scrollback must now hold the captured alt-screen frame.
+	// The screen is 4 rows tall; all 4 rows must be pushed (blank rows
+	// are preserved to maintain the TUI's visual layout).
 	sbLen := tp.emu.ScrollbackLen()
 	if sbLen == 0 {
 		t.Fatal("alt-screen ED2 frame not captured to main scrollback (scrollback is empty)")
+	}
+	if sbLen != 4 {
+		t.Fatalf("expected 4 rows pushed (full screen height), got %d", sbLen)
 	}
 
 	// The captured row must contain the text we wrote to the alt screen.
@@ -683,6 +688,48 @@ func TestTerminalPane_AltScreenED2CapturesFrameToMainScrollback(t *testing.T) {
 	}
 	if !strings.Contains(got.String(), "altcontent") {
 		t.Errorf("captured scrollback row does not contain alt-screen text: got %q", got.String())
+	}
+}
+
+func TestTerminalPane_AltScreenED2PreservesBlankRows(t *testing.T) {
+	src := make(chan []byte, 4)
+	tp := New(src)
+	defer tp.Close()
+	tp.Resize(20, 4)
+
+	// Enter alt-screen.
+	src <- []byte("\x1b[?1049h")
+	waitForTouched(t, tp, 1)
+
+	// Write content on row 0 only — rows 1-3 remain blank.
+	src <- []byte("\x1b[1;1Haltcontent\x1b[2J")
+	waitForTouched(t, tp, 2)
+
+	// All 4 rows must be pushed (including the 3 blank ones).
+	sbLen := tp.emu.ScrollbackLen()
+	if sbLen != 4 {
+		t.Fatalf("expected 4 rows in scrollback (full screen height), got %d", sbLen)
+	}
+
+	// Row 0 must contain the text.
+	var got strings.Builder
+	for x := 0; x < len("altcontent"); x++ {
+		if cell := tp.emu.ScrollbackCellAt(x, 0); cell != nil {
+			got.WriteString(cell.Content)
+		}
+	}
+	if !strings.Contains(got.String(), "altcontent") {
+		t.Errorf("scrollback row 0 does not contain altcontent: got %q", got.String())
+	}
+
+	// Rows 1-3 must be blank (all cells nil or empty).
+	for row := 1; row < 4; row++ {
+		for x := 0; x < 20; x++ {
+			cell := tp.emu.ScrollbackCellAt(x, row)
+			if cell != nil && cell.Content != "" && cell.Content != " " {
+				t.Errorf("row %d col %d: expected blank cell, got %q", row, x, cell.Content)
+			}
+		}
 	}
 }
 

@@ -119,18 +119,29 @@ func New(source <-chan []byte) *TerminalPane {
 			return false
 		}
 		w, h := eRaw.Width(), eRaw.Height()
+
+		// Skip entirely blank frames (e.g. the first ED2 before any content
+		// is drawn). A frame has content if any cell has a non-space rune.
+		hasAnyContent := false
+	scanFrame:
 		for y := 0; y < h; y++ {
-			hasContent := false
 			for x := 0; x < w; x++ {
-				cell := eRaw.CellAt(x, y)
-				if cell != nil && cell.Content != "" && cell.Content != " " {
-					hasContent = true
-					break
+				if cell := eRaw.CellAt(x, y); cell != nil {
+					if cell.Content != "" && cell.Content != " " {
+						hasAnyContent = true
+						break scanFrame
+					}
 				}
 			}
-			if !hasContent {
-				continue
-			}
+		}
+		if !hasAnyContent {
+			return false
+		}
+
+		// Push ALL rows — including blank rows — to preserve the TUI's
+		// visual layout. Skipping blank rows collapses spacing between
+		// content sections, making scrollback appear garbled.
+		for y := 0; y < h; y++ {
 			line := make(uv.Line, w)
 			for x := 0; x < w; x++ {
 				if cell := eRaw.CellAt(x, y); cell != nil {
