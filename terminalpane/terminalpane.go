@@ -99,11 +99,16 @@ func New(source <-chan []byte) *TerminalPane {
 		},
 	})
 
-	// Intercept ED2 (ESC[2J) while in alt-screen to capture each rendered
-	// frame to the main scrollback. x/vt routes scrollback pushes to the
-	// active screen's own buffer; the alt screen's buffer is never visible
-	// via ScrollbackLen/ScrollbackCellAt. Bubble Tea fires ED2 before every
-	// full render, so each frame is captured as the operator scrolls back.
+	// Intercept ED2 (ESC[2J) to capture each rendered frame to the main
+	// scrollback. x/vt routes scrollback pushes to the active screen's own
+	// buffer; the alt screen's buffer is never visible via
+	// ScrollbackLen/ScrollbackCellAt. Bubble Tea fires ED2 before every full
+	// render, so each frame is captured as the operator scrolls back.
+	//
+	// Note: we do NOT gate on IsAltScreen(). When a task's ring buffer has
+	// overflowed past the \033[?1049h alt-screen entry, the emulator replays
+	// in main-screen mode but the cells contain identical Claude Code content.
+	// The hasAnyContent blank-frame skip is the correct safety valve.
 	//
 	// Uses eRaw.* (raw Emulator) rather than tp.emu.* (SafeEmulator) —
 	// SafeEmulator.Write holds mu.Lock; re-entering via CellAt would deadlock.
@@ -111,7 +116,7 @@ func New(source <-chan []byte) *TerminalPane {
 	eRaw := tp.emu.Emulator
 	tp.emu.RegisterCsiHandler('J', func(params ansi.Params) bool {
 		n, _, _ := params.Param(0, 0)
-		if n != 2 || !eRaw.IsAltScreen() {
+		if n != 2 {
 			return false
 		}
 		mainSB := eRaw.Scrollback()
